@@ -1,0 +1,165 @@
+# ============================================================
+# Workflow GitHub Actions — scraping hebdomadaire des stations Michi no Eki
+#
+# Ce fichier doit être placé dans le dépôt Evasionsrebelles/michinoEki,
+# à l'emplacement exact :
+#   .github/workflows/scrape-michinoeki.yml
+#
+# Le script 01-scrape_michinoeki.py doit lui aussi être présent à la
+# racine de ce même dépôt (il n'a besoin d'aucun jeton ni d'aucune
+# modification : il écrit simplement michinoeki.json et update_date.txt
+# dans le dossier courant — c'est ce workflow qui se charge de committer
+# et pousser ces deux fichiers, contrairement au scraper du calendrier
+# Japon qui les publiait lui-même via l'API GitHub).
+#
+# Ce que fait ce workflow :
+# 1. Se déclenche automatiquement chaque lundi à 10h00, heure française
+#    (Europe/Paris), ou manuellement depuis l'onglet "Actions" de GitHub.
+#    GitHub n'exécute les cron qu'en UTC et ignore les fuseaux/heure
+#    d'été : deux horaires cron sont donc déclarés (un pour l'heure
+#    d'hiver CET, un pour l'heure d'été CEST) et une étape de garde
+#    vérifie l'heure réelle à Paris au moment du déclenchement pour
+#    n'exécuter le scraping qu'une seule fois, à 10h00 pile.
+# 2. Installe Python sur une machine virtuelle temporaire.
+# 3. Installe les dépendances du scraper (requests, beautifulsoup4).
+# 4. Exécute 01-scrape_michinoeki.py, qui régénère localement
+#    michinoeki.json et update_date.txt.
+# 5. Committe et pousse ces deux fichiers sur main s'ils ont changé,
+#    en utilisant le jeton intégré GITHUB_TOKEN (le workflow vit dans
+#    le même dépôt que les fichiers à mettre à jour, donc pas besoin
+#    d'un Personal Access Token séparé — sauf si la branche main est
+#    protégée par des règles qui excluent le jeton par défaut).
+# 6. Envoie un mail de statut (succès ou échec) via Gmail SMTP, quel
+#    que soit le résultat des étapes précédentes.
+#
+# Fichiers remplacés par ce workflow :
+#   https://github.com/Evasionsrebelles/michinoEki/blob/main/michinoeki.json
+#   https://github.com/Evasionsrebelles/michinoEki/blob/main/update_date.txt
+#
+# Secrets GitHub Actions requis pour le mail :
+#   MAIL_USERNAME : adresse Gmail complète (ex: toncompte@gmail.com)
+#   MAIL_PASSWORD : mot de passe d'application Gmail (16 caractères,
+#                   généré sur myaccount.google.com/apppasswords)
+#   MAIL_TO       : adresse qui recevra la notification de statut
+# ============================================================
+
+name: Scraping hebdomadaire Michi no Eki
+
+on:
+  # Déclenchement manuel : un bouton "Run workflow" apparaît
+  # dans l'onglet Actions du dépôt GitHub. Il ignore la garde horaire
+  # ci-dessous et s'exécute immédiatement, quelle que soit l'heure.
+  workflow_dispatch:
+
+  # Déclenchement planifié (syntaxe cron, toujours en UTC côté GitHub).
+  # Deux horaires pour couvrir les deux cas heure d'hiver/heure d'été :
+  #   10h00 CET (hiver, UTC+1) = 09h00 UTC
+  #   10h00 CEST (été, UTC+2)  = 08h00 UTC
+  # La garde ci-dessous n'en laisse passer qu'un seul selon la saison.
+  schedule:
+    - cron: '0 9 * * 1'   # 10h00 heure française — heure d'hiver (CET)
+    - cron: '0 8 * * 1'   # 10h00 heure française — heure d'été (CEST)
+
+jobs:
+  # ── Garde : vérifie qu'il est bien 10h00 à Paris ──────────────────────────
+  # Nécessaire car GitHub ne gère ni les fuseaux horaires ni l'heure d'été
+  # dans la syntaxe cron : avec deux déclenchements programmés (un par
+  # saison), un seul correspond réellement à 10h00 heure française à un
+  # instant donné — c'est celui-là qu'on laisse passer.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Vérification de l'heure française
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Déclenchement manuel : exécution immédiate."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          heure_paris=$(TZ='Europe/Paris' date +'%H')
+          echo "Heure actuelle à Paris : ${heure_paris}h"
+          if [ "$heure_paris" = "10" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Pas 10h00 à Paris (déclenchement de l'autre saison) : on ignore ce run."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  scrape:
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    # Nécessaire pour que GITHUB_TOKEN puisse pousser le commit sur main.
+    permissions:
+      contents: write
+
+    steps:
+      # Étape 1 : récupère le code du dépôt sur la machine virtuelle
+      - name: Récupération du dépôt
+        uses: actions/checkout@v4
+
+      # Étape 2 : installe Python
+      - name: Installation de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Étape 3 : installe les dépendances du scraper
+      - name: Installation des dépendances
+        run: pip install requests beautifulsoup4
+
+      # Étape 4 : lance le scraper, qui régénère localement
+      # michinoeki.json et update_date.txt à la racine du dépôt.
+      - name: Exécution du scraper
+        id: scrape
+        run: python3 01-scrape_michinoeki.py
+
+      # Étape 5 : committe et pousse les fichiers de sortie sur main,
+      # uniquement si le scraping a réussi et qu'ils ont réellement changé.
+      - name: Commit et push des données mises à jour
+        id: commit
+        if: steps.scrape.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add michinoeki.json update_date.txt
+          if git diff --cached --quiet; then
+            echo "Aucun changement détecté, rien à committer."
+          else
+            git commit -m "Mise à jour automatique des données Michi no Eki ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git push
+          fi
+
+      # Étape 6 : envoie un mail de statut, que le scraping ait réussi
+      # ou échoué (if: always() = s'exécute quel que soit le résultat
+      # des étapes précédentes).
+      - name: Envoi du mail de statut
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: >-
+            [Michi no Eki] Scraping
+            ${{ steps.scrape.outcome == 'success' && 'réussi ✅' || 'échoué ❌' }}
+            (${{ github.run_id }})
+          to: ${{ secrets.MAIL_TO }}
+          from: Michi no Eki - GitHub Actions
+          body: |
+            Résultat de l'exécution : ${{ steps.scrape.outcome }}
+
+            Dépôt : ${{ github.repository }}
+            Workflow : ${{ github.workflow }}
+            Déclenché par : ${{ github.event_name }}
+
+            Fichiers mis à jour :
+            https://github.com/${{ github.repository }}/blob/main/michinoeki.json
+            https://github.com/${{ github.repository }}/blob/main/update_date.txt
+
+            Détails complets du run :
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
