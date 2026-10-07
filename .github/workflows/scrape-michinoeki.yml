@@ -13,13 +13,15 @@
 # Japon qui les publiait lui-même via l'API GitHub).
 #
 # Ce que fait ce workflow :
-# 1. Se déclenche automatiquement chaque lundi à 10h00, heure française
-#    (Europe/Paris), ou manuellement depuis l'onglet "Actions" de GitHub.
-#    GitHub n'exécute les cron qu'en UTC et ignore les fuseaux/heure
-#    d'été : deux horaires cron sont donc déclarés (un pour l'heure
-#    d'hiver CET, un pour l'heure d'été CEST) et une étape de garde
-#    vérifie l'heure réelle à Paris au moment du déclenchement pour
-#    n'exécuter le scraping qu'une seule fois, à 10h00 pile.
+# 1. Se déclenche automatiquement chaque lundi à 10h00, heure du Japon
+#    (JST, UTC+9), ou manuellement depuis l'onglet "Actions" de GitHub.
+#    GitHub n'exécute les cron qu'en UTC. Le Japon n'ayant pas d'heure
+#    d'été (décalage fixe de +9h toute l'année), un seul cron suffit :
+#    10h00 JST = 01h00 UTC le même lundi. Aucune garde horaire n'est
+#    nécessaire. Note : GitHub peut retarder l'exécution des cron
+#    planifiés (parfois de plusieurs heures aux heures de charge),
+#    ce qui est sans conséquence ici puisque rien ne dépend de l'heure
+#    réelle de lancement.
 # 2. Installe Python sur une machine virtuelle temporaire.
 # 3. Installe les dépendances du scraper (requests, beautifulsoup4).
 # 4. Exécute 01-scrape_michinoeki.py, qui régénère localement
@@ -47,50 +49,17 @@ name: Scraping hebdomadaire Michi no Eki
 
 on:
   # Déclenchement manuel : un bouton "Run workflow" apparaît
-  # dans l'onglet Actions du dépôt GitHub. Il ignore la garde horaire
-  # ci-dessous et s'exécute immédiatement, quelle que soit l'heure.
+  # dans l'onglet Actions du dépôt GitHub. Il s'exécute immédiatement,
+  # quelle que soit l'heure.
   workflow_dispatch:
 
   # Déclenchement planifié (syntaxe cron, toujours en UTC côté GitHub).
-  # Deux horaires pour couvrir les deux cas heure d'hiver/heure d'été :
-  #   10h00 CET (hiver, UTC+1) = 09h00 UTC
-  #   10h00 CEST (été, UTC+2)  = 08h00 UTC
-  # La garde ci-dessous n'en laisse passer qu'un seul selon la saison.
+  # Lundi 10h00 JST (UTC+9, sans heure d'été) = lundi 01h00 UTC.
   schedule:
-    - cron: '0 9 * * 1'   # 10h00 heure française — heure d'hiver (CET)
-    - cron: '0 8 * * 1'   # 10h00 heure française — heure d'été (CEST)
+    - cron: '0 1 * * 1'   # lundi 10h00 heure du Japon (JST)
 
 jobs:
-  # ── Garde : vérifie qu'il est bien 10h00 à Paris ──────────────────────────
-  # Nécessaire car GitHub ne gère ni les fuseaux horaires ni l'heure d'été
-  # dans la syntaxe cron : avec deux déclenchements programmés (un par
-  # saison), un seul correspond réellement à 10h00 heure française à un
-  # instant donné — c'est celui-là qu'on laisse passer.
-  guard:
-    runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.check.outputs.should_run }}
-    steps:
-      - name: Vérification de l'heure française
-        id: check
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Déclenchement manuel : exécution immédiate."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          heure_paris=$(TZ='Europe/Paris' date +'%H')
-          echo "Heure actuelle à Paris : ${heure_paris}h"
-          if [ "$heure_paris" = "10" ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Pas 10h00 à Paris (déclenchement de l'autre saison) : on ignore ce run."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-          fi
-
   scrape:
-    needs: guard
-    if: needs.guard.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     # Nécessaire pour que GITHUB_TOKEN puisse pousser le commit sur main.
     permissions:
