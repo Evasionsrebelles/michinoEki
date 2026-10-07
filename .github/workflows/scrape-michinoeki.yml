@@ -26,12 +26,18 @@
 # 3. Installe les dépendances du scraper (requests, beautifulsoup4).
 # 4. Exécute 01-scrape_michinoeki.py, qui régénère localement
 #    michinoeki.json et update_date.txt.
-# 5. Committe et pousse ces deux fichiers sur main s'ils ont changé,
+# 5. Archive l'ancienne version : si le nouveau michinoeki.json diffère
+#    de celui de main, l'ancien est copié sous michinoeki_DD_MM_YY.json
+#    (date de l'ancienne version, lue dans l'ancien update_date.txt).
+#    Seules les 5 archives les plus récentes sont conservées : les plus
+#    anciennes sont supprimées (tri par année, puis mois, puis jour).
+# 6. Committe et pousse michinoeki.json, update_date.txt et les archives
+#    (ajout et suppression) sur main s'ils ont changé,
 #    en utilisant le jeton intégré GITHUB_TOKEN (le workflow vit dans
 #    le même dépôt que les fichiers à mettre à jour, donc pas besoin
 #    d'un Personal Access Token séparé — sauf si la branche main est
 #    protégée par des règles qui excluent le jeton par défaut).
-# 6. Envoie un mail de statut (succès ou échec) via Gmail SMTP, quel
+# 7. Envoie un mail de statut (succès ou échec) via Gmail SMTP, quel
 #    que soit le résultat des étapes précédentes.
 #
 # Fichiers remplacés par ce workflow :
@@ -86,7 +92,51 @@ jobs:
         id: scrape
         run: python3 01-scrape_michinoeki.py
 
-      # Étape 5 : committe et pousse les fichiers de sortie sur main,
+      # Étape 5 : archive l'ancienne version (celle de main) sous
+      # michinoeki_DD_MM_YY.json, puis ne garde que les 5 archives
+      # les plus récentes.
+      - name: Archivage de l'ancienne version
+        id: archive
+        if: steps.scrape.outcome == 'success'
+        run: |
+          # Première exécution : aucune ancienne version à archiver.
+          if ! git cat-file -e HEAD:michinoeki.json 2>/dev/null; then
+            echo "Pas d'ancienne version dans le dépôt : rien à archiver."
+            exit 0
+          fi
+          git show HEAD:michinoeki.json > /tmp/old_michinoeki.json
+
+          # Contenu identique : pas d'archive (sinon des doublons feraient
+          # sortir de vraies anciennes versions de la fenêtre des 5).
+          if cmp -s /tmp/old_michinoeki.json michinoeki.json; then
+            echo "Données identiques à la version actuelle : pas d'archive."
+            exit 0
+          fi
+
+          # Date de l'ancienne version, lue dans l'ancien update_date.txt
+          # (format attendu : DD/MM/YYYY HH:MM). À défaut, date du jour (UTC).
+          old_date=$(git show HEAD:update_date.txt 2>/dev/null \
+            | grep -oE '[0-9]{2}/[0-9]{2}/[0-9]{4}' | head -n 1 || true)
+          if [ -n "$old_date" ]; then
+            dd="${old_date:0:2}"; mm="${old_date:3:2}"; yy="${old_date:8:2}"
+          else
+            dd=$(date -u +'%d'); mm=$(date -u +'%m'); yy=$(date -u +'%y')
+            echo "update_date.txt illisible : date du jour utilisée."
+          fi
+          archive="michinoeki_${dd}_${mm}_${yy}.json"
+          cp /tmp/old_michinoeki.json "$archive"
+          echo "Ancienne version archivée : $archive"
+
+          # Rotation : tri chronologique (YYMMDD), on supprime tout sauf
+          # les 5 plus récentes.
+          ls -1 michinoeki_[0-9][0-9]_[0-9][0-9]_[0-9][0-9].json 2>/dev/null \
+            | sed -E 's/^michinoeki_([0-9]{2})_([0-9]{2})_([0-9]{2})\.json$/\3\2\1 &/' \
+            | sort \
+            | head -n -5 \
+            | cut -d' ' -f2- \
+            | xargs -r rm -v
+
+      # Étape 6 : committe et pousse les fichiers de sortie sur main,
       # uniquement si le scraping a réussi et qu'ils ont réellement changé.
       - name: Commit et push des données mises à jour
         id: commit
@@ -95,6 +145,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add michinoeki.json update_date.txt
+          # -A : prend aussi en compte les archives supprimées par la rotation.
+          git add -A -- 'michinoeki_*.json'
           if git diff --cached --quiet; then
             echo "Aucun changement détecté, rien à committer."
           else
@@ -102,7 +154,7 @@ jobs:
             git push
           fi
 
-      # Étape 6 : envoie un mail de statut, que le scraping ait réussi
+      # Étape 7 : envoie un mail de statut, que le scraping ait réussi
       # ou échoué (if: always() = s'exécute quel que soit le résultat
       # des étapes précédentes).
       - name: Envoi du mail de statut
